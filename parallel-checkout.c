@@ -39,8 +39,8 @@ void get_parallel_checkout_configs(int *num_workers, int *threshold)
 
 	if (env_workers && *env_workers) {
 		if (strtol_i(env_workers, 10, num_workers)) {
-			die("invalid value for GIT_TEST_CHECKOUT_WORKERS: '%s'",
-			    env_workers);
+			die(_("invalid value for '%s': '%s'"),
+			    "GIT_TEST_CHECKOUT_WORKERS", env_workers);
 		}
 		if (*num_workers < 1)
 			*num_workers = online_cpus();
@@ -143,7 +143,8 @@ static int is_eligible_for_parallel_checkout(const struct cache_entry *ce,
 	}
 }
 
-int enqueue_checkout(struct cache_entry *ce, struct conv_attrs *ca)
+int enqueue_checkout(struct cache_entry *ce, struct conv_attrs *ca,
+		     int *checkout_counter)
 {
 	struct parallel_checkout_item *pc_item;
 
@@ -159,6 +160,7 @@ int enqueue_checkout(struct cache_entry *ce, struct conv_attrs *ca)
 	memcpy(&pc_item->ca, ca, sizeof(pc_item->ca));
 	pc_item->status = PC_ITEM_PENDING;
 	pc_item->id = parallel_checkout.nr;
+	pc_item->checkout_counter = checkout_counter;
 	parallel_checkout.nr++;
 
 	return 0;
@@ -200,7 +202,8 @@ static int handle_results(struct checkout *state)
 
 		switch(pc_item->status) {
 		case PC_ITEM_WRITTEN:
-			/* Already handled */
+			if (pc_item->checkout_counter)
+				(*pc_item->checkout_counter)++;
 			break;
 		case PC_ITEM_COLLIDED:
 			/*
@@ -225,7 +228,8 @@ static int handle_results(struct checkout *state)
 			 * add any extra overhead.
 			 */
 			ret |= checkout_entry_ca(pc_item->ce, &pc_item->ca,
-						 state, NULL, NULL);
+						 state, NULL,
+						 pc_item->checkout_counter);
 			advance_progress_meter();
 			break;
 		case PC_ITEM_PENDING:
@@ -261,7 +265,7 @@ static int write_pc_item_to_fd(struct parallel_checkout_item *pc_item, int fd,
 	struct stream_filter *filter;
 	struct strbuf buf = STRBUF_INIT;
 	char *blob;
-	unsigned long size;
+	size_t size;
 	ssize_t wrote;
 
 	/* Sanity check */
@@ -411,7 +415,7 @@ static void send_one_item(int fd, struct parallel_checkout_item *pc_item)
 	len_data = sizeof(struct pc_item_fixed_portion) + name_len +
 		   working_tree_encoding_len;
 
-	data = xcalloc(1, len_data);
+	data = xmalloc(len_data);
 
 	fixed_portion = (struct pc_item_fixed_portion *)data;
 	fixed_portion->id = pc_item->id;
@@ -421,13 +425,12 @@ static void send_one_item(int fd, struct parallel_checkout_item *pc_item)
 	fixed_portion->name_len = name_len;
 	fixed_portion->working_tree_encoding_len = working_tree_encoding_len;
 	/*
-	 * We use hashcpy() instead of oidcpy() because the hash[] positions
-	 * after `the_hash_algo->rawsz` might not be initialized. And Valgrind
-	 * would complain about passing uninitialized bytes to a syscall
-	 * (write(2)). There is no real harm in this case, but the warning could
-	 * hinder the detection of actual errors.
+	 * We pad the unused bytes in the hash array because, otherwise,
+	 * Valgrind would complain about passing uninitialized bytes to a
+	 * write() syscall. The warning doesn't represent any real risk here,
+	 * but it could hinder the detection of actual errors.
 	 */
-	hashcpy(fixed_portion->oid.hash, pc_item->ce->oid.hash);
+	oidcpy_with_padding(&fixed_portion->oid, &pc_item->ce->oid);
 
 	variant = data + sizeof(*fixed_portion);
 	if (working_tree_encoding_len) {
@@ -604,8 +607,7 @@ static void gather_results_from_workers(struct pc_worker *workers,
 				continue;
 
 			if (pfd->revents & POLLIN) {
-				int len = packet_read(pfd->fd, NULL, NULL,
-						      packet_buffer,
+				int len = packet_read(pfd->fd, packet_buffer,
 						      sizeof(packet_buffer), 0);
 
 				if (len < 0) {

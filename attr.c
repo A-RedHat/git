@@ -23,10 +23,6 @@ static const char git_attr__unknown[] = "(builtin)unknown";
 #define ATTR__UNSET NULL
 #define ATTR__UNKNOWN git_attr__unknown
 
-#ifndef DEBUG_ATTR
-#define DEBUG_ATTR 0
-#endif
-
 struct git_attr {
 	int attr_nr; /* unique attribute number */
 	char name[FLEX_ARRAY]; /* attribute name */
@@ -61,10 +57,10 @@ struct attr_hash_entry {
 };
 
 /* attr_hashmap comparison function */
-static int attr_hash_entry_cmp(const void *unused_cmp_data,
+static int attr_hash_entry_cmp(const void *cmp_data UNUSED,
 			       const struct hashmap_entry *eptr,
 			       const struct hashmap_entry *entry_or_key,
-			       const void *unused_keydata)
+			       const void *keydata UNUSED)
 {
 	const struct attr_hash_entry *a, *b;
 
@@ -79,7 +75,7 @@ static int attr_hash_entry_cmp(const void *unused_cmp_data,
  * Access to this dictionary must be surrounded with a mutex.
  */
 static struct attr_hashmap g_attr_hashmap = {
-	HASHMAP_INIT(attr_hash_entry_cmp, NULL)
+	.map = HASHMAP_INIT(attr_hash_entry_cmp, NULL),
 };
 
 /*
@@ -685,7 +681,7 @@ static struct attr_stack *read_attr_from_array(const char **list)
  * Callers into the attribute system assume there is a single, system-wide
  * global state where attributes are read from and when the state is flipped by
  * calling git_attr_set_direction(), the stack frames that have been
- * constructed need to be discarded so so that subsequent calls into the
+ * constructed need to be discarded so that subsequent calls into the
  * attribute system will lazily read from the right place.  Since changing
  * direction causes a global paradigm shift, it should not ever be called while
  * another thread could potentially be calling into the attribute system.
@@ -744,6 +740,20 @@ static struct attr_stack *read_attr_from_index(struct index_state *istate,
 	if (!istate)
 		return NULL;
 
+	/*
+	 * The .gitattributes file only applies to files within its
+	 * parent directory. In the case of cone-mode sparse-checkout,
+	 * the .gitattributes file is sparse if and only if all paths
+	 * within that directory are also sparse. Thus, don't load the
+	 * .gitattributes file since it will not matter.
+	 *
+	 * In the case of a sparse index, it is critical that we don't go
+	 * looking for a .gitattributes file, as doing so would cause the
+	 * index to expand.
+	 */
+	if (!path_in_cone_mode_sparse_checkout(path, istate))
+		return NULL;
+
 	buf = read_blob_data_from_index(istate, path, NULL);
 	if (!buf)
 		return NULL;
@@ -792,33 +802,6 @@ static struct attr_stack *read_attr(struct index_state *istate,
 		CALLOC_ARRAY(res, 1);
 	return res;
 }
-
-#if DEBUG_ATTR
-static void debug_info(const char *what, struct attr_stack *elem)
-{
-	fprintf(stderr, "%s: %s\n", what, elem->origin ? elem->origin : "()");
-}
-static void debug_set(const char *what, const char *match, struct git_attr *attr, const void *v)
-{
-	const char *value = v;
-
-	if (ATTR_TRUE(value))
-		value = "set";
-	else if (ATTR_FALSE(value))
-		value = "unset";
-	else if (ATTR_UNSET(value))
-		value = "unspecified";
-
-	fprintf(stderr, "%s: %s => %s (%s)\n",
-		what, attr->name, (char *) value, match);
-}
-#define debug_push(a) debug_info("push", (a))
-#define debug_pop(a) debug_info("pop", (a))
-#else
-#define debug_push(a) do { ; } while (0)
-#define debug_pop(a) do { ; } while (0)
-#define debug_set(a,b,c,d) do { ; } while (0)
-#endif /* DEBUG_ATTR */
 
 static const char *git_etc_gitattributes(void)
 {
@@ -940,7 +923,6 @@ static void prepare_attr_stack(struct index_state *istate,
 		    (!namelen || path[namelen] == '/'))
 			break;
 
-		debug_pop(elem);
 		*stack = elem->prev;
 		attr_stack_free(elem);
 	}
@@ -1009,12 +991,12 @@ static int path_matches(const char *pathname, int pathlen,
 	}
 	return match_pathname(pathname, pathlen - isdir,
 			      base, baselen,
-			      pattern, prefix, pat->patternlen, pat->flags);
+			      pattern, prefix, pat->patternlen);
 }
 
 static int macroexpand_one(struct all_attrs_item *all_attrs, int nr, int rem);
 
-static int fill_one(const char *what, struct all_attrs_item *all_attrs,
+static int fill_one(struct all_attrs_item *all_attrs,
 		    const struct match_attr *a, int rem)
 {
 	int i;
@@ -1025,9 +1007,6 @@ static int fill_one(const char *what, struct all_attrs_item *all_attrs,
 		const char *v = a->state[i].setto;
 
 		if (*n == ATTR__UNKNOWN) {
-			debug_set(what,
-				  a->is_macro ? a->u.attr->name : a->u.pat.pattern,
-				  attr, v);
 			*n = v;
 			rem--;
 			rem = macroexpand_one(all_attrs, attr->attr_nr, rem);
@@ -1050,7 +1029,7 @@ static int fill(const char *path, int pathlen, int basename_offset,
 				continue;
 			if (path_matches(path, pathlen, basename_offset,
 					 &a->u.pat, base, stack->originlen))
-				rem = fill_one("fill", all_attrs, a, rem);
+				rem = fill_one(all_attrs, a, rem);
 		}
 	}
 
@@ -1062,7 +1041,7 @@ static int macroexpand_one(struct all_attrs_item *all_attrs, int nr, int rem)
 	const struct all_attrs_item *item = &all_attrs[nr];
 
 	if (item->macro && item->value == ATTR__TRUE)
-		return fill_one("expand", all_attrs, item->macro, rem);
+		return fill_one(all_attrs, item->macro, rem);
 	else
 		return rem;
 }

@@ -195,10 +195,10 @@ static struct lline *coalesce_lines(struct lline *base, int *lenbase,
 	struct lline *baseend, *newend = NULL;
 	int i, j, origbaselen = *lenbase;
 
-	if (newline == NULL)
+	if (!newline)
 		return base;
 
-	if (base == NULL) {
+	if (!base) {
 		*lenbase = lennew;
 		return newline;
 	}
@@ -403,11 +403,11 @@ static void consume_hunk(void *state_,
 	state->sline[state->nb-1].p_lno[state->n] = state->ob;
 }
 
-static void consume_line(void *state_, char *line, unsigned long len)
+static int consume_line(void *state_, char *line, unsigned long len)
 {
 	struct combine_diff_state *state = state_;
 	if (!state->lost_bucket)
-		return; /* not in any hunk yet */
+		return 0; /* not in any hunk yet */
 	switch (line[0]) {
 	case '-':
 		append_lost(state->lost_bucket, state->n, line+1, len-1);
@@ -417,6 +417,7 @@ static void consume_line(void *state_, char *line, unsigned long len)
 		state->lno++;
 		break;
 	}
+	return 0;
 }
 
 static void combine_diff(struct repository *r,
@@ -1496,6 +1497,13 @@ void diff_tree_combined(const struct object_id *oid,
 	struct combine_diff_path *p, *paths;
 	int i, num_paths, needsep, show_log_first, num_parent = parents->nr;
 	int need_generic_pathscan;
+
+	if (opt->ignore_regex_nr)
+		die("combined diff and '%s' cannot be used together",
+		    "--ignore-matching-lines");
+	if (opt->close_file)
+		die("combined diff and '%s' cannot be used together",
+		    "--output");
 
 	/* nothing to do, if no parents */
 	if (!num_parent)

@@ -48,7 +48,7 @@ done
 test_expect_success 'shared=all' '
 	mkdir sub &&
 	cd sub &&
-	git init --shared=all &&
+	git init --template= --shared=all &&
 	test 2 = $(git config core.sharedrepository)
 '
 
@@ -57,6 +57,7 @@ test_expect_success POSIXPERM 'update-server-info honors core.sharedRepository' 
 	git add a1 &&
 	test_tick &&
 	git commit -m a1 &&
+	mkdir .git/info &&
 	umask 0277 &&
 	git update-server-info &&
 	actual="$(ls -l .git/info/refs)" &&
@@ -124,7 +125,7 @@ test_expect_success POSIXPERM 'git reflog expire honors core.sharedRepository' '
 		: happy
 		;;
 	*)
-		echo Ooops, .git/logs/refs/heads/main is not 0662 [$actual]
+		echo Ooops, .git/logs/refs/heads/main is not 066x [$actual]
 		false
 		;;
 	esac

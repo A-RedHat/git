@@ -23,7 +23,8 @@ test_expect_success setup '
 	git commit -a -m "Third in one history." &&
 	A2=$(git rev-parse --verify HEAD) &&
 
-	rm -f .git/refs/heads/main .git/index &&
+	git update-ref -d refs/heads/main &&
+	rm -f .git/index &&
 
 	echo >fileA fileA again &&
 	echo >subdir/fileB fileB again &&
@@ -98,6 +99,7 @@ do
 	"
 
 	test_expect_success 'with grafts' "
+		mkdir -p .git/info &&
 		echo '$B0 $A2' >.git/info/grafts &&
 		check $type $B2 -- $B2 $B1 $B0 $A2 $A1 $A0
 	"

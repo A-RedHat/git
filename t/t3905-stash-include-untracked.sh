@@ -333,6 +333,8 @@ test_expect_success 'stash show --include-untracked shows untracked files' '
 	git stash show -p --include-untracked >actual &&
 	test_cmp expect actual &&
 	git stash show --include-untracked -p >actual &&
+	test_cmp expect actual &&
+	git -c stash.showIncludeUntracked=true stash show -p >actual &&
 	test_cmp expect actual
 '
 
@@ -418,6 +420,12 @@ test_expect_success 'stash show --{include,only}-untracked on stashes without un
 
 	git stash show --only-untracked >actual &&
 	test_must_be_empty actual
+'
+
+test_expect_success 'stash -u ignores sub-repository' '
+	test_when_finished "rm -rf sub-repo" &&
+	git init sub-repo &&
+	git stash -u
 '
 
 test_done

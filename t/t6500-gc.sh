@@ -95,6 +95,50 @@ test_expect_success 'gc --keep-largest-pack' '
 	)
 '
 
+test_expect_success 'pre-auto-gc hook can stop auto gc' '
+	cat >err.expect <<-\EOF &&
+	no gc for you
+	EOF
+
+	git init pre-auto-gc-hook &&
+	test_hook -C pre-auto-gc-hook pre-auto-gc <<-\EOF &&
+	echo >&2 no gc for you &&
+	exit 1
+	EOF
+	(
+		cd pre-auto-gc-hook &&
+
+		git config gc.auto 3 &&
+		git config gc.autoDetach false &&
+
+		# We need to create two object whose sha1s start with 17
+		# since this is what git gc counts.  As it happens, these
+		# two blobs will do so.
+		test_commit "$(test_oid obj1)" &&
+		test_commit "$(test_oid obj2)" &&
+
+		git gc --auto >../out.actual 2>../err.actual
+	) &&
+	test_must_be_empty out.actual &&
+	test_cmp err.expect err.actual &&
+
+	cat >err.expect <<-\EOF &&
+	will gc for you
+	Auto packing the repository for optimum performance.
+	See "git help gc" for manual housekeeping.
+	EOF
+
+	test_hook -C pre-auto-gc-hook --clobber pre-auto-gc <<-\EOF &&
+	echo >&2 will gc for you &&
+	exit 0
+	EOF
+
+	git -C pre-auto-gc-hook gc --auto >out.actual 2>err.actual &&
+
+	test_must_be_empty out.actual &&
+	test_cmp err.expect err.actual
+'
+
 test_expect_success 'auto gc with too many loose objects does not attempt to create bitmaps' '
 	test_config gc.auto 3 &&
 	test_config gc.autodetach false &&
@@ -158,6 +202,102 @@ test_expect_success 'one of gc.reflogExpire{Unreachable,}=never does not skip "e
 	grep -E "^trace: (built-in|exec|run_command): git reflog expire --" trace.out
 '
 
+prepare_cruft_history () {
+	test_commit base &&
+
+	test_commit --no-tag foo &&
+	test_commit --no-tag bar &&
+	git reset HEAD^^
+}
+
+assert_cruft_packs () {
+	find .git/objects/pack -name "*.mtimes" >mtimes &&
+	sed -e 's/\.mtimes$/\.pack/g' mtimes >packs &&
+
+	test_file_not_empty packs &&
+	while read pack
+	do
+		test_path_is_file "$pack" || return 1
+	done <packs
+}
+
+assert_no_cruft_packs () {
+	find .git/objects/pack -name "*.mtimes" >mtimes &&
+	test_must_be_empty mtimes
+}
+
+test_expect_success 'gc --cruft generates a cruft pack' '
+	test_when_finished "rm -fr crufts" &&
+	git init crufts &&
+	(
+		cd crufts &&
+
+		prepare_cruft_history &&
+		git gc --cruft &&
+		assert_cruft_packs
+	)
+'
+
+test_expect_success 'gc.cruftPacks=true generates a cruft pack' '
+	test_when_finished "rm -fr crufts" &&
+	git init crufts &&
+	(
+		cd crufts &&
+
+		prepare_cruft_history &&
+		git -c gc.cruftPacks=true gc &&
+		assert_cruft_packs
+	)
+'
+
+test_expect_success 'feature.experimental=true generates a cruft pack' '
+	git init crufts &&
+	test_when_finished "rm -fr crufts" &&
+	(
+		cd crufts &&
+
+		prepare_cruft_history &&
+		git -c feature.experimental=true gc &&
+		assert_cruft_packs
+	)
+'
+
+test_expect_success 'feature.experimental=false allows explicit cruft packs' '
+	git init crufts &&
+	test_when_finished "rm -fr crufts" &&
+	(
+		cd crufts &&
+
+		prepare_cruft_history &&
+		git -c gc.cruftPacks=true -c feature.experimental=false gc &&
+		assert_cruft_packs
+	)
+'
+
+test_expect_success 'feature.experimental=true can be overridden' '
+	git init crufts &&
+	test_when_finished "rm -fr crufts" &&
+	(
+		cd crufts &&
+
+		prepare_cruft_history &&
+		git -c feature.expiremental=true -c gc.cruftPacks=false gc &&
+		assert_no_cruft_packs
+	)
+'
+
+test_expect_success 'feature.experimental=false avoids cruft packs by default' '
+	git init crufts &&
+	test_when_finished "rm -fr crufts" &&
+	(
+		cd crufts &&
+
+		prepare_cruft_history &&
+		git -c feature.experimental=false gc &&
+		assert_no_cruft_packs
+	)
+'
+
 run_and_wait_for_auto_gc () {
 	# We read stdout from gc for the side effect of waiting until the
 	# background gc process exits, closing its fd 9.  Furthermore, the
@@ -195,7 +335,7 @@ test_expect_success 'background auto gc respects lock for all operations' '
 
 	# create a ref whose loose presence we can use to detect a pack-refs run
 	git update-ref refs/heads/should-be-loose HEAD &&
-	test_path_is_file .git/refs/heads/should-be-loose &&
+	(ls -1 .git/refs/heads .git/reftable >expect || true) &&
 
 	# now fake a concurrent gc that holds the lock; we can use our
 	# shell pid so that it looks valid.
@@ -212,7 +352,8 @@ test_expect_success 'background auto gc respects lock for all operations' '
 
 	# our gc should exit zero without doing anything
 	run_and_wait_for_auto_gc &&
-	test_path_is_file .git/refs/heads/should-be-loose
+	(ls -1 .git/refs/heads .git/reftable >actual || true) &&
+	test_cmp expect actual
 '
 
 # DO NOT leave a detached auto gc process running near the end of the

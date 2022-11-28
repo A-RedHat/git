@@ -4,9 +4,10 @@
  * Copyright (C) 2005 Linus Torvalds
  *
  */
-#define USE_THE_INDEX_COMPATIBILITY_MACROS
+#define USE_THE_INDEX_VARIABLE
 #include "builtin.h"
 #include "config.h"
+#include "dir.h"
 #include "lockfile.h"
 #include "quote.h"
 #include "cache-tree.h"
@@ -17,6 +18,7 @@
 #define CHECKOUT_ALL 4
 static int nul_term_line;
 static int checkout_stage; /* default to checkout stage0 */
+static int ignore_skip_worktree; /* default to 0 */
 static int to_tempfile;
 static char topath[4][TEMPORARY_FILENAME_LENGTH + 1];
 
@@ -63,21 +65,29 @@ static void write_tempfile_record(const char *name, const char *prefix)
 static int checkout_file(const char *name, const char *prefix)
 {
 	int namelen = strlen(name);
-	int pos = cache_name_pos(name, namelen);
+	int pos = index_name_pos(&the_index, name, namelen);
 	int has_same_name = 0;
+	int is_file = 0;
+	int is_skipped = 1;
 	int did_checkout = 0;
 	int errs = 0;
 
 	if (pos < 0)
 		pos = -pos - 1;
 
-	while (pos < active_nr) {
-		struct cache_entry *ce = active_cache[pos];
+	while (pos < the_index.cache_nr) {
+		struct cache_entry *ce = the_index.cache[pos];
 		if (ce_namelen(ce) != namelen ||
 		    memcmp(ce->name, name, namelen))
 			break;
 		has_same_name = 1;
 		pos++;
+		if (S_ISSPARSEDIR(ce->ce_mode))
+			break;
+		is_file = 1;
+		if (!ignore_skip_worktree && ce_skip_worktree(ce))
+			break;
+		is_skipped = 0;
 		if (ce_stage(ce) != checkout_stage
 		    && (CHECKOUT_ALL != checkout_stage || !ce_stage(ce)))
 			continue;
@@ -106,6 +116,11 @@ static int checkout_file(const char *name, const char *prefix)
 		fprintf(stderr, "git checkout-index: %s ", name);
 		if (!has_same_name)
 			fprintf(stderr, "is not in the cache");
+		else if (!is_file)
+			fprintf(stderr, "is a sparse directory");
+		else if (is_skipped)
+			fprintf(stderr, "has skip-worktree enabled; "
+					"use '--ignore-skip-worktree-bits' to checkout");
 		else if (checkout_stage)
 			fprintf(stderr, "does not exist at stage %d",
 				checkout_stage);
@@ -121,10 +136,27 @@ static int checkout_all(const char *prefix, int prefix_length)
 	int i, errs = 0;
 	struct cache_entry *last_ce = NULL;
 
-	/* TODO: audit for interaction with sparse-index. */
-	ensure_full_index(&the_index);
-	for (i = 0; i < active_nr ; i++) {
-		struct cache_entry *ce = active_cache[i];
+	for (i = 0; i < the_index.cache_nr ; i++) {
+		struct cache_entry *ce = the_index.cache[i];
+
+		if (S_ISSPARSEDIR(ce->ce_mode)) {
+			if (!ce_skip_worktree(ce))
+				BUG("sparse directory '%s' does not have skip-worktree set", ce->name);
+
+			/*
+			 * If the current entry is a sparse directory and skip-worktree
+			 * entries are being checked out, expand the index and continue
+			 * the loop on the current index position (now pointing to the
+			 * first entry inside the expanded sparse directory).
+			 */
+			if (ignore_skip_worktree) {
+				ensure_full_index(&the_index);
+				ce = the_index.cache[i];
+			}
+		}
+
+		if (!ignore_skip_worktree && ce_skip_worktree(ce))
+			continue;
 		if (ce_stage(ce) != checkout_stage
 		    && (CHECKOUT_ALL != checkout_stage || !ce_stage(ce)))
 			continue;
@@ -185,6 +217,8 @@ int cmd_checkout_index(int argc, const char **argv, const char *prefix)
 	struct option builtin_checkout_index_options[] = {
 		OPT_BOOL('a', "all", &all,
 			N_("check out all files in the index")),
+		OPT_BOOL(0, "ignore-skip-worktree-bits", &ignore_skip_worktree,
+			N_("do not skip files with skip-worktree set")),
 		OPT__FORCE(&force, N_("force overwrite of existing files"), 0),
 		OPT__QUIET(&quiet,
 			N_("no warning for existing files and files not in index")),
@@ -212,7 +246,10 @@ int cmd_checkout_index(int argc, const char **argv, const char *prefix)
 	git_config(git_default_config, NULL);
 	prefix_length = prefix ? strlen(prefix) : 0;
 
-	if (read_cache() < 0) {
+	prepare_repo_settings(the_repository);
+	the_repository->settings.command_requires_full_index = 0;
+
+	if (repo_read_index(the_repository) < 0) {
 		die("invalid cache");
 	}
 
@@ -233,7 +270,8 @@ int cmd_checkout_index(int argc, const char **argv, const char *prefix)
 	if (index_opt && !state.base_dir_len && !to_tempfile) {
 		state.refresh_cache = 1;
 		state.istate = &the_index;
-		hold_locked_index(&lock_file, LOCK_DIE_ON_ERROR);
+		repo_hold_locked_index(the_repository, &lock_file,
+				       LOCK_DIE_ON_ERROR);
 	}
 
 	get_parallel_checkout_configs(&pc_workers, &pc_threshold);

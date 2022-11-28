@@ -3,7 +3,7 @@
  *
  * Copyright (C) Linus Torvalds, 2005
  */
-#define USE_THE_INDEX_COMPATIBILITY_MACROS
+#define USE_THE_INDEX_VARIABLE
 #include "cache.h"
 #include "config.h"
 #include "commit.h"
@@ -39,7 +39,7 @@ static int abbrev_ref_strict;
 static int output_sq;
 
 static int stuck_long;
-static struct string_list *ref_excludes;
+static struct ref_exclusions ref_excludes = REF_EXCLUSIONS_INIT;
 
 /*
  * Some arguments are relevant "revision" arguments,
@@ -195,15 +195,17 @@ static int show_default(void)
 	return 0;
 }
 
-static int show_reference(const char *refname, const struct object_id *oid, int flag, void *cb_data)
+static int show_reference(const char *refname, const struct object_id *oid,
+			  int flag UNUSED, void *cb_data UNUSED)
 {
-	if (ref_excluded(ref_excludes, refname))
+	if (ref_excluded(&ref_excludes, refname))
 		return 0;
 	show_rev(NORMAL, oid, refname);
 	return 0;
 }
 
-static int anti_reference(const char *refname, const struct object_id *oid, int flag, void *cb_data)
+static int anti_reference(const char *refname, const struct object_id *oid,
+			  int flag UNUSED, void *cb_data UNUSED)
 {
 	show_rev(REVERSED, oid, refname);
 	return 0;
@@ -435,11 +437,11 @@ static int cmd_parseopt(int argc, const char **argv, const char *prefix)
 	/* get the usage up to the first line with a -- on it */
 	for (;;) {
 		if (strbuf_getline(&sb, stdin) == EOF)
-			die("premature end of input");
+			die(_("premature end of input"));
 		ALLOC_GROW(usage, unb + 1, usz);
 		if (!strcmp("--", sb.buf)) {
 			if (unb < 1)
-				die("no usage string given before the `--' separator");
+				die(_("no usage string given before the `--' separator"));
 			usage[unb] = NULL;
 			break;
 		}
@@ -476,8 +478,11 @@ static int cmd_parseopt(int argc, const char **argv, const char *prefix)
 
 		/* name(s) */
 		s = strpbrk(sb.buf, flag_chars);
-		if (s == NULL)
+		if (!s)
 			s = help;
+
+		if (s == sb.buf)
+			die(_("missing opt-spec before option flags"));
 
 		if (s - sb.buf == 1) /* short option only */
 			o->short_name = *sb.buf;
@@ -545,7 +550,7 @@ static void die_no_single_rev(int quiet)
 	if (quiet)
 		exit(1);
 	else
-		die("Needed a single revision");
+		die(_("Needed a single revision"));
 }
 
 static const char builtin_rev_parse_usage[] =
@@ -580,7 +585,7 @@ static void handle_ref_opt(const char *pattern, const char *prefix)
 		for_each_glob_ref_in(show_reference, pattern, prefix, NULL);
 	else
 		for_each_ref_in(prefix, show_reference, NULL);
-	clear_ref_exclusion(&ref_excludes);
+	clear_ref_exclusions(&ref_excludes);
 }
 
 enum format_type {
@@ -709,10 +714,10 @@ int cmd_rev_parse(int argc, const char **argv, const char *prefix)
 			if (!strcmp(arg, "--resolve-git-dir")) {
 				const char *gitdir = argv[++i];
 				if (!gitdir)
-					die("--resolve-git-dir requires an argument");
+					die(_("--resolve-git-dir requires an argument"));
 				gitdir = resolve_gitdir(gitdir);
 				if (!gitdir)
-					die("not a gitdir '%s'", argv[i]);
+					die(_("not a gitdir '%s'"), argv[i]);
 				puts(gitdir);
 				continue;
 			}
@@ -723,6 +728,9 @@ int cmd_rev_parse(int argc, const char **argv, const char *prefix)
 			prefix = setup_git_directory();
 			git_config(git_default_config, NULL);
 			did_repo_setup = 1;
+
+			prepare_repo_settings(the_repository);
+			the_repository->settings.command_requires_full_index = 0;
 		}
 
 		if (!strcmp(arg, "--")) {
@@ -736,7 +744,7 @@ int cmd_rev_parse(int argc, const char **argv, const char *prefix)
 		if (!seen_end_of_options && *arg == '-') {
 			if (!strcmp(arg, "--git-path")) {
 				if (!argv[i + 1])
-					die("--git-path requires an argument");
+					die(_("--git-path requires an argument"));
 				strbuf_reset(&buf);
 				print_path(git_path("%s", argv[i + 1]), prefix,
 						format,
@@ -746,7 +754,7 @@ int cmd_rev_parse(int argc, const char **argv, const char *prefix)
 			}
 			if (!strcmp(arg,"-n")) {
 				if (++i >= argc)
-					die("-n requires an argument");
+					die(_("-n requires an argument"));
 				if ((filter & DO_FLAGS) && (filter & DO_REVS)) {
 					show(arg);
 					show(argv[i]);
@@ -759,25 +767,27 @@ int cmd_rev_parse(int argc, const char **argv, const char *prefix)
 				continue;
 			}
 			if (opt_with_value(arg, "--path-format", &arg)) {
+				if (!arg)
+					die(_("--path-format requires an argument"));
 				if (!strcmp(arg, "absolute")) {
 					format = FORMAT_CANONICAL;
 				} else if (!strcmp(arg, "relative")) {
 					format = FORMAT_RELATIVE;
 				} else {
-					die("unknown argument to --path-format: %s", arg);
+					die(_("unknown argument to --path-format: %s"), arg);
 				}
 				continue;
 			}
 			if (!strcmp(arg, "--default")) {
 				def = argv[++i];
 				if (!def)
-					die("--default requires an argument");
+					die(_("--default requires an argument"));
 				continue;
 			}
 			if (!strcmp(arg, "--prefix")) {
 				prefix = argv[++i];
 				if (!prefix)
-					die("--prefix requires an argument");
+					die(_("--prefix requires an argument"));
 				startup_info->prefix = prefix;
 				output_prefix = 1;
 				continue;
@@ -846,14 +856,14 @@ int cmd_rev_parse(int argc, const char **argv, const char *prefix)
 					else if (!strcmp(arg, "loose"))
 						abbrev_ref_strict = 0;
 					else
-						die("unknown mode for --abbrev-ref: %s",
+						die(_("unknown mode for --abbrev-ref: %s"),
 						    arg);
 				}
 				continue;
 			}
 			if (!strcmp(arg, "--all")) {
 				for_each_ref(show_reference, NULL);
-				clear_ref_exclusion(&ref_excludes);
+				clear_ref_exclusions(&ref_excludes);
 				continue;
 			}
 			if (skip_prefix(arg, "--disambiguate=", &arg)) {
@@ -861,15 +871,19 @@ int cmd_rev_parse(int argc, const char **argv, const char *prefix)
 				continue;
 			}
 			if (!strcmp(arg, "--bisect")) {
-				for_each_fullref_in("refs/bisect/bad", show_reference, NULL, 0);
-				for_each_fullref_in("refs/bisect/good", anti_reference, NULL, 0);
+				for_each_fullref_in("refs/bisect/bad", show_reference, NULL);
+				for_each_fullref_in("refs/bisect/good", anti_reference, NULL);
 				continue;
 			}
 			if (opt_with_value(arg, "--branches", &arg)) {
+				if (ref_excludes.hidden_refs_configured)
+					return error(_("--exclude-hidden cannot be used together with --branches"));
 				handle_ref_opt(arg, "refs/heads/");
 				continue;
 			}
 			if (opt_with_value(arg, "--tags", &arg)) {
+				if (ref_excludes.hidden_refs_configured)
+					return error(_("--exclude-hidden cannot be used together with --tags"));
 				handle_ref_opt(arg, "refs/tags/");
 				continue;
 			}
@@ -878,6 +892,8 @@ int cmd_rev_parse(int argc, const char **argv, const char *prefix)
 				continue;
 			}
 			if (opt_with_value(arg, "--remotes", &arg)) {
+				if (ref_excludes.hidden_refs_configured)
+					return error(_("--exclude-hidden cannot be used together with --remotes"));
 				handle_ref_opt(arg, "refs/remotes/");
 				continue;
 			}
@@ -885,12 +901,16 @@ int cmd_rev_parse(int argc, const char **argv, const char *prefix)
 				add_ref_exclusion(&ref_excludes, arg);
 				continue;
 			}
+			if (skip_prefix(arg, "--exclude-hidden=", &arg)) {
+				exclude_hidden_refs(&ref_excludes, arg);
+				continue;
+			}
 			if (!strcmp(arg, "--show-toplevel")) {
 				const char *work_tree = get_git_work_tree();
 				if (work_tree)
 					print_path(work_tree, prefix, format, DEFAULT_UNMODIFIED);
 				else
-					die("this operation must be run in a work tree");
+					die(_("this operation must be run in a work tree"));
 				continue;
 			}
 			if (!strcmp(arg, "--show-superproject-working-tree")) {
@@ -987,7 +1007,7 @@ int cmd_rev_parse(int argc, const char **argv, const char *prefix)
 				continue;
 			}
 			if (!strcmp(arg, "--shared-index-path")) {
-				if (read_cache() < 0)
+				if (repo_read_index(the_repository) < 0)
 					die(_("Could not read the index"));
 				if (the_index.split_index) {
 					const struct object_id *oid = &the_index.split_index->base_oid;
@@ -1018,7 +1038,7 @@ int cmd_rev_parse(int argc, const char **argv, const char *prefix)
 				if (strcmp(val, "storage") &&
 				    strcmp(val, "input") &&
 				    strcmp(val, "output"))
-					die("unknown mode for --show-object-format: %s",
+					die(_("unknown mode for --show-object-format: %s"),
 					    arg);
 				puts(the_hash_algo->name);
 				continue;
@@ -1056,7 +1076,7 @@ int cmd_rev_parse(int argc, const char **argv, const char *prefix)
 		if (verify)
 			die_no_single_rev(quiet);
 		if (has_dashdash)
-			die("bad revision '%s'", arg);
+			die(_("bad revision '%s'"), arg);
 		as_is = 1;
 		if (!show_file(arg, output_prefix))
 			continue;
